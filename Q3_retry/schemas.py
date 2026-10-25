@@ -8,6 +8,12 @@ PROFILE = "ga5-mailroom-action-gate/v2"
 
 CALL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{12,128}$")
 
+# Tool arguments must be identifiers, not prose or copied secrets.
+IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+-]{0,255}$")
+IDENT_FIELDS = {
+    "referenceId", "sourceEventId", "artifactId",
+    "claimedSender", "recipient",
+}
 ALLOWED_ACTIONS = [
     "create_draft",
     "update_internal_record",
@@ -211,6 +217,20 @@ def validate_proposal(proposal: dict, dossier: dict) -> dict:
         if payload["reasonCode"] not in NO_ACTION_REASONS:
             raise ValueError("Invalid no_action reasonCode")
 
+    # --- canary / raw-text guard -------------------------------------------
+    # Arguments must look like identifiers. This blocks a model that copies
+    # prose or a secret token from a dossier line into a tool argument.
+    for field in IDENT_FIELDS:
+        if field in payload:
+            v = payload[field]
+            if not IDENT_RE.fullmatch(v):
+                raise ValueError(
+                    f"Payload {field!r} is not an identifier: {v!r}"
+                )
+    # ------------------------------------------------------------------------
+
+    target = proposal["target"]
+
     target = proposal["target"]
     expected_kind = TARGET_KINDS[action]
 
@@ -233,6 +253,21 @@ def validate_proposal(proposal: dict, dossier: dict) -> dict:
         if action == "quarantine_item" and target["id"] != "mailroom":
             raise ValueError("quarantine_item target ID must be mailroom")
 
+        # Target id shape checks
+        if action == "create_draft":
+            if not target["id"].startswith("mailbox:"):
+                raise ValueError("draft_queue target id must start with mailbox:")
+            addr = target["id"][len("mailbox:"):]
+            if not IDENT_RE.fullmatch(addr) or "@" not in addr:
+                raise ValueError("draft_queue target id has invalid mailbox")
+        elif action == "send_approved_notice":
+            if not IDENT_RE.fullmatch(target["id"]) or "@" not in target["id"]:
+                raise ValueError("email target id must be a plain address")
+        else:
+            # case_record, approval_queue, security_queue ids
+            if not IDENT_RE.fullmatch(target["id"]):
+                raise ValueError("target id is not an identifier")
+
     evidence = proposal["evidence"]
 
     if not isinstance(evidence, list) or not evidence:
@@ -249,4 +284,33 @@ def validate_proposal(proposal: dict, dossier: dict) -> dict:
     if not set(evidence).issubset(available_ids):
         raise ValueError("Evidence contains unknown line IDs")
 
+    return proposal
+
+
+AUTHORITY_WORDS = ("approve", "approved", "authorize", "authorized",
+                   "case", "sent", "completed", "duplicate", "ignore previous")
+
+def trim_evidence(proposal, dossier):
+    """Keep the smallest set of lines that prove authority or arguments."""
+    if len(proposal["evidence"]) <= 2:
+        return proposal
+    # map lineId -> text
+    texts = {}
+    for src in dossier.get("sources", []):
+        for ln in src.get("lines", []):
+            texts[ln["lineId"]] = ln["text"].lower()
+    # collect argument values to look for
+    needles = [str(v).lower() for v in proposal["payload"].values()
+               if isinstance(v, str) and len(v) >= 3]
+    if proposal.get("target"):
+        needles.append(str(proposal["target"]["id"]).lower())
+    keep = []
+    for lid in proposal["evidence"]:
+        t = texts.get(lid, "")
+        if any(n in t for n in needles) or any(w in t for w in AUTHORITY_WORDS):
+            keep.append(lid)
+    # always keep at least the first cited line
+    if not keep:
+        keep = [proposal["evidence"][0]]
+    proposal["evidence"] = keep[:3]
     return proposal

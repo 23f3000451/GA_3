@@ -250,8 +250,14 @@ async def propose(body):
                 proposal = json.loads(stored["proposal_json"])
 
             # Call IDs are dossier-specific and stable across evaluations.
+
+            # Call IDs are dossier-specific and stable across evaluations.
             proposal["callId"] = stable_call_id(dossier)
-            validate_proposal(proposal, dossier)
+            try:
+                validate_proposal(proposal, dossier)
+            except Exception as exc:
+                print(f"CACHED PROPOSAL INVALID {dossier['dossierId']}: {exc}")
+                proposal = _fallback_proposal(dossier)
             proposals.append(proposal)
 
         if len({p["callId"] for p in proposals}) != len(proposals):
