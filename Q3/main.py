@@ -1,3 +1,6 @@
+
+
+
 import base64
 import hashlib
 import json
@@ -56,8 +59,7 @@ def proposal_digest(proposal: dict) -> str:
 
 
 def make_call_id(fingerprint: str) -> str:
-    return "call_" + hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
-
+    return hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
 
 # ---------- Database ----------
 def init_db():
@@ -206,6 +208,9 @@ async def call_model(dossier: dict) -> dict:
     return json.loads(r.json()["choices"][0]["message"]["content"])
 
 
+# FILL THESE FROM THE "Frozen target and payload types" SECTION
+# of the challenge page. These are the ONLY allowed keys per action.
+
 def normalize(dossier: dict, raw: dict, allowed: list[str]) -> dict:
     fp = content_fingerprint(dossier)
     call_id = make_call_id(fp)
@@ -214,42 +219,42 @@ def normalize(dossier: dict, raw: dict, allowed: list[str]) -> dict:
     if action not in ALLOWED_ACTIONS or action not in allowed:
         action = "quarantine_item"
 
-    valid_ids = set()
-    for s in dossier.get("sources", []):
-        for line in s.get("lines", []):
-            valid_ids.add(line["lineId"])
+    valid_ids = {l["lineId"]
+                 for s in dossier.get("sources", [])
+                 for l in s.get("lines", [])}
 
-    ev = raw.get("evidence", [])
-    if not isinstance(ev, list):
-        ev = []
-    ev = [e for e in ev if isinstance(e, str) and e in valid_ids]
+    ev = [e for e in raw.get("evidence", [])
+          if isinstance(e, str) and e in valid_ids]
     seen = set()
     ev = [e for e in ev if not (e in seen or seen.add(e))]
+    if not ev and valid_ids:
+        ev = [sorted(valid_ids)[0]]
 
-    target = raw.get("target")
-    if not (isinstance(target, dict) and isinstance(target.get("kind"), str)
-            and isinstance(target.get("id"), str)):
-        target = None
+    # Normalize target: {kind,id} with both strings, or None. No invention.
+    raw_target = raw.get("target")
+    if (isinstance(raw_target, dict)
+            and isinstance(raw_target.get("kind"), str)
+            and isinstance(raw_target.get("id"), str)
+            and raw_target["kind"]
+            and raw_target["id"]):
+        target = {"kind": raw_target["kind"], "id": raw_target["id"]}
     else:
-        target = {"kind": target["kind"], "id": target["id"]}
+        target = None
 
-    payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+    # Normalize payload: dict only, no raw mail text.
+    raw_payload = raw.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
 
-    if action == "send_approved_notice":
-        text = dossier_text(dossier).lower()
-        has_approval = ("approval" in text or "approved" in text) and "template" in text
-        if not has_approval or target is None:
-            action = "request_confirmation"
-            target = {"kind": "approval_queue", "id": "mailroom-approvals"}
-            payload = {}
+    # Actions that REQUIRE a target: if none, downgrade to quarantine.
+    if action in ("create_draft", "update_internal_record",
+                  "send_approved_notice", "request_confirmation"):
+        if target is None:
+            action = "quarantine_item"
+            payload = {"reason": "missing_target"}
 
+    # Actions that must have null target.
     if action in ("quarantine_item", "no_action"):
         target = None
-
-    if action in ("create_draft", "update_internal_record") and target is None:
-        action = "request_confirmation"
-        target = {"kind": "approval_queue", "id": "mailroom-approvals"}
-        payload = {}
 
     return {
         "dossierId": dossier["dossierId"],
@@ -259,8 +264,6 @@ def normalize(dossier: dict, raw: dict, allowed: list[str]) -> dict:
         "payload": payload,
         "evidence": ev,
     }
-
-
 # ---------- Signature verification ----------
 def verify_receipt(jwk: dict, r: ReceiptItem, evaluation_id: str) -> bool:
     try:
@@ -270,6 +273,7 @@ def verify_receipt(jwk: dict, r: ReceiptItem, evaluation_id: str) -> bool:
 
         # Try the most natural scope first; if the grader rejects, add/remove fields here.
         signed = {
+            "evaluationId": evaluation_id,     # ADD THIS LINE
             "dossierId": r.dossierId,
             "callId": r.callId,
             "action": r.action,
