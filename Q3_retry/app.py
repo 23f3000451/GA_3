@@ -244,6 +244,9 @@ async def propose(body):
         raise
     except Exception:
         await db.rollback()
+    	import traceback
+    	traceback.print_exc()          # prints full stack to Render logs
+    	print(f"PROPOSE ERROR: {type(e).__name__}: {e}")
         raise HTTPException(503, "Proposal generation failed")
     finally:
         await db.close()
