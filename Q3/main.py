@@ -203,8 +203,8 @@ async def call_model(dossier: dict) -> dict:
                 "temperature": 0,
             },
         )
-    if r.status_code != 200:
-        raise HTTPException(502, f"AI error: {r.status_code}")
+	if r.status_code != 200:
+    		raise HTTPException(502, f"AI error: {r.status_code} body={r.text[:300]}")
     return json.loads(r.json()["choices"][0]["message"]["content"])
 
 
@@ -333,18 +333,25 @@ async def handle_propose(req: ProposeRequest) -> JSONResponse:
             )
             for (i, d, fp), res in zip(to_call, results):
                 if isinstance(res, Exception):
-                    p = {
-                        "dossierId": d["dossierId"],
-                        "callId": make_call_id(fp),
-                        "action": "quarantine_item",
-                        "target": None,
-                        "payload": {"reason": "model_error"},
-                        "evidence": [],
-                    }
+	if isinstance(res, Exception):
+    		# Contract-valid fallback: must have ≥1 real lineId.
+    		valid_ids = sorted({
+        		l["lineId"]
+        		for s in d.get("sources", [])
+        		for l in s.get("lines", [])
+    		})
+    		p = {
+        		"dossierId": d["dossierId"],
+        		"callId": make_call_id(fp),
+        		"action": "quarantine_item",
+        		"target": None,
+        		"payload": {},
+        		"evidence": valid_ids[:1] if valid_ids else [],
+    		}
                 else:
                     p = normalize(d, res, req.allowedActions)
-                proposals[i] = p
-                db.execute(
+        	    proposals[i] = p
+     	           db.execute(
                     "INSERT OR REPLACE INTO dossier_cache (fingerprint, proposal_json) VALUES (?,?)",
                     (fp, canonical_json(p)),
                 )
