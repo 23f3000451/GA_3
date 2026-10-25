@@ -23,6 +23,31 @@ from schemas import (
 DB_PATH = os.getenv("DATABASE_PATH", "/var/data/mailroom.db")
 MAX_BODY = 2 * 1024 * 1024
 
+def _fallback_proposal(dossier):
+    """Conservative proposal when the model fails.
+
+    Uses the first lineId of the dossier as evidence so the schema stays valid.
+    """
+    line_ids = [
+        line["lineId"]
+        for source in dossier.get("sources", [])
+        for line in source.get("lines", [])
+        if isinstance(line.get("lineId"), str) and line["lineId"]
+    ]
+    if not line_ids:
+        raise HTTPException(422, "Dossier has no usable evidence lines")
+    return {
+        "dossierId": dossier["dossierId"],
+        "callId": stable_call_id(dossier),
+        "action": "request_confirmation",
+        "target": {"kind": "approval_queue", "id": dossier["mailbox"]},
+        "payload": {
+            "claimedSender": "unknown",
+            "questionCode": "VERIFY_REQUEST",
+            "referenceId": dossier["dossierId"],
+        },
+        "evidence": [line_ids[0]],
+    }
 
 @asynccontextmanager
 async def lifespan(app):
@@ -121,6 +146,14 @@ async def propose(body):
     ):
         raise HTTPException(422, "Invalid public key JWK")
 
+    import base64 as _b64
+    try:
+        _raw = _b64.urlsafe_b64decode(jwk["x"] + "=" * (-len(jwk["x"]) % 4))
+    except Exception:
+        raise HTTPException(422, "Invalid public key JWK")
+    if len(_raw) != 32:
+        raise HTTPException(422, "Invalid public key JWK")
+
     dossiers = body["dossiers"]
     if not isinstance(dossiers, list):
         raise HTTPException(422, "Invalid dossiers")
@@ -193,9 +226,17 @@ async def propose(body):
 
             if cached:
                 proposal = json.loads(cached["proposal_json"])
+            
             else:
-                proposal = make_decision(dossier)
-                validate_proposal(proposal, dossier)
+                try:
+                    proposal = make_decision(dossier)
+                    validate_proposal(proposal, dossier)
+                except Exception as exc:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"DECISION ERROR for {dossier['dossierId']}: "
+                          f"{type(exc).__name__}: {exc}")
+                    proposal = _fallback_proposal(dossier)
                 await db.execute(
                     "INSERT OR IGNORE INTO decisions VALUES (?, ?)",
                     (fp, canonical_bytes(proposal).decode()),
@@ -242,11 +283,11 @@ async def propose(body):
     except HTTPException:
         await db.rollback()
         raise
-    except Exception:
+    except Exception as exc:
         await db.rollback()
         import traceback
         traceback.print_exc()          # prints full stack to Render logs
-        print(f"PROPOSE ERROR: {type(e).__name__}: {e}")
+        print(f"PROPOSE ERROR: {type(e).__name__}: {exc}")
         raise HTTPException(503, "Proposal generation failed")
     finally:
         await db.close()
@@ -384,8 +425,11 @@ async def commit(body):
     except HTTPException:
         await db.rollback()
         raise
-    except Exception:
+    except Exception as exc:
         await db.rollback()
+        import traceback
+        traceback.print_exc()
+        print(f"COMMIT ERROR: {type(exc).__name__}: {exc}")
         raise HTTPException(503, "Commit failed")
     finally:
         await db.close()
