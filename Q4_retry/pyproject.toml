@@ -1,0 +1,21 @@
+[project]
+name = "q4-retry"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "23f3000451", email = "23f3000451@ds.study.iitm.ac.in" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.162.0",
+    "httpx>=0.28.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+q4-retry = "q4_retry:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
